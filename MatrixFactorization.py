@@ -38,7 +38,7 @@ now = lambda: datetime.datetime.now()
 # In[ ]:
 
 directory = 'sample-data-v2/'
-ndataset = 'goout'#"movielens_1m"
+ndataset = 'movielens_1m'#"movielens_1m"
 data_path = '/home/kuba/ownCloud/Recombee/'
 
 
@@ -67,11 +67,11 @@ with open(data_path+directory+ndataset+"/items.str2int.json",'r') as f:
 
 
 
-def split_dataset(dataset, test_size, relevant):        
+def split_dataset(dataset, test_size, relevant):
     dataset["Testset"] = False
     if(test_size == 0):
-        return dataset[dataset.Testset==False], dataset[dataset.Testset==True] 
-    
+        return dataset[dataset.Testset==False], dataset[dataset.Testset==True]
+
     relevant_ = dataset.loc[dataset['rating']>=relevant]
     test_indices = []
     for key, user_relevant in relevant_.groupby('userId'):
@@ -109,7 +109,7 @@ class MatrixFactorization:
 
         #hodnota, kdy je rating oznacen za relevantni
         self.relevant = relevant
-        #velikost trenovaci mnoziny <0,1>
+        #velVkost trenovaci mnoziny <0,1>
         self.test_size = test_size
 
         #slozka vyrazenych uzivatelu
@@ -163,38 +163,57 @@ class MatrixFactorization:
         #TESTSET
         #dictonary: userId : {"ids":[...], "ratings":[...], 'weights':[...]}
         #ids : indexy items
-        self.User_Items_testset = self.columns_to_dict(self.Testset, 'userId_', ['itemId_','rating'])
+        self.User_Items_testset = self.columns_to_dict(self.Testset, 'userId_', ['itemId_','rating'], user_tag = True)
         #dictonary: itemId : {"ids":[...], "ratings":[...], 'weights':[...]}
         #ids : indexy users
-        self.Item_Users_testset = self.columns_to_dict(self.Testset, 'itemId_', ['userId_','rating'])
+        self.Item_Users_testset = self.columns_to_dict(self.Testset, 'itemId_', ['userId_','rating'], user_tag = False)
 
         #koeficient <0,1> ovlivnujici tendenci modelu doporucovat popularni items (1)
         self.beta = None
 
 
-    def columns_to_dict(self, df, key_column, value_column):
+    def columns_to_dict(self, df, key_column, value_column, user_tag = False):
         """Transformace pandas.DataFrame do dictonary"""
         dict_ = {}
         matrix = df[[key_column] + value_column].as_matrix()
 
         for row in matrix:
             key = int(row[0])
-            ids = int(row[1])
+            id_ = int(row[1])
             rating = row[2]
             if(matrix.shape[1]>3):
                 weight = row[3]
             try:
-                dict_[key]['ids'].append(ids)
+                dict_[key]['ids'].append(id_)
                 dict_[key]['ratings'].append(rating)
+                if(user_tag):
+                    rating_temp = rating - np.dot(self.Users[key], self.Items[id_])
+                else:
+                    rating_temp = rating - np.dot(self.Users[id_], self.Items[key])
+                dict_[key]['ratings_temp'].append(rating_temp)
+
+
                 if(matrix.shape[1]>3):
-                    dict_[key]['weights'].append(weight)
+                    if(user_tag):
+                        dict_[key]['weights'].append(1)
+                    else:
+                        dict_[key]['weights'].append(weight)
 
             except:
-                dict_[key] = {'ids':[], 'ratings':[], 'weights':[]}
-                dict_[key]['ids'].append(ids)
+                dict_[key] = {'ids':[], 'ratings':[], 'weights':[], 'ratings_temp':[]}
+                dict_[key]['ids'].append(id_)
                 dict_[key]['ratings'].append(rating)
+                if(user_tag):
+                    rating_temp = rating - np.dot(self.Users[key], self.Items[id_])
+                else:
+                    rating_temp = rating - np.dot(self.Users[id_], self.Items[key])
+                dict_[key]['ratings_temp'].append(rating_temp)
+
                 if(matrix.shape[1]>3):
-                    dict_[key]['weights'].append(weight)
+                    if(user_tag):
+                        dict_[key]['weights'].append(1)
+                    else:
+                        dict_[key]['weights'].append(weight)
 
 
         return dict_
@@ -219,6 +238,7 @@ class MatrixFactorization:
             no_relevant_ratings = np.sum(dataframe['rating']>=self.relevant)
             dict_[itemId] = pow((1/(no_relevant_ratings+1)),self.beta)
 
+        self.Items_weight = np.array([dict_[i] for i in range(len(dict_.keys()))])
         return dict_
     '''
     INIT
@@ -257,6 +277,7 @@ class MatrixFactorization:
             if(self.beta is None or self.beta != beta):
                 self.beta = 0
                 self.Item_weight = self.item_weight(self.Trainset)
+
                 self.init_users_items_dictonary()
             print("** Set weight: ",self.weight, " to missing ratings and ", set(self.Trainset['weight'])," to observate ratings **")
 
@@ -287,9 +308,9 @@ class MatrixFactorization:
         self.Trainset['weight'] = self.Trainset['weight'].apply(lambda w: w/weight_sum*self.no_ratings)
 
         #dictonary: userId : {"ids":[...], "ratings":[...], 'weights':[...]} ; ids : indexy items
-        self.User_Items = self.columns_to_dict(self.Trainset, 'userId_', ['itemId_','rating', 'weight'])
+        self.User_Items = self.columns_to_dict(self.Trainset, 'userId_', ['itemId_','rating', 'weight'], user_tag= True)
         #dictonary: itemId : {"ids":[...], "ratings":[...], 'weights':[...]} ; ids : indexy users
-        self.Item_Users = self.columns_to_dict(self.Trainset, 'itemId_', ['userId_','rating', 'weight'])
+        self.Item_Users = self.columns_to_dict(self.Trainset, 'itemId_', ['userId_','rating', 'weight'], user_tag= False)
 
 
     '''
@@ -335,56 +356,54 @@ class MatrixFactorization:
     LATENT FACTORS
     '''
 
-    def items_factor(self,batch):
-        """Update latentnich vektoru. Kazdy procesor dostane disjunktni "varku" latentnich vektoru ke zpracovani.
-        batch: range(i,i+N)
+    def coo_descent_inner(self,v_ids, v, r, w, x, k, Wy, Y, YTY, LI, Bc, Bd, Be):
+        A = 0
+        for i, id_ in enumerate(v_ids):
+            A += (1 - w*Wy[i]) * np.dot(Y[id_:id_+1].T, Y[id_:id_+1])
 
-        http://users.cs.fiu.edu/~lzhen001/activities/KDD_USB_key_2010/docs/p713.pdf
-        """
-        V = self.Items
-        U = self.Users
-        UU = self.UU
-        lambda_, r_m  = self.lambda_, self.imputation_value,
-        
-        weight, no_factors,no_Items = self.weight, self.no_factors, self.no_Items
-        eye = np.eye(no_factors)
-        d = now()
-        for i in batch:
-            i_rated = self.Item_Users[i]['ids']
-            U_s = U[i_rated,:]
-            Wi = np.array([self.Item_Users[i]['weights']])
+        B = 0
+        for i, id_ in enumerate(v_ids):
+            B += (1 - w*Wy[i]) * Y[id_] * v[i]
+            B += w*Wy[i] * (r[i] - self.imputation_value) * Y[id_]
 
-            lM = (np.asmatrix(self.Item_Users[i]['ratings']) - r_m).dot(np.multiply(Wi.T.dot(np.ones((1,no_factors))), U_s))
-            rM = UU - (weight*U_s.T).dot(U_s) + np.multiply(U_s.T,  np.ones((no_factors,1)).dot(Wi)).dot(U_s)
+        return (B + w*(Bc - x.dot(Bd) + x[k]*Be)) / (A + w*YTY + LI)
 
-            reg = lambda_ * (weight * (no_Items-len(Wi)) + (Wi-weight).sum()) * eye
-            res = np.linalg.solve(rM+reg,lM.T)
-            #Update latentniho vektoru items matice
-            V[i,:] = res.flatten()
-        print("ITEM TIME ", now() - d)
+    def coo_descent_outer(self, Xk, Yk, f_dim, user_tag = True):
+        if(user_tag):
+            x = self.Users.shape[0]
+            y = self.Items.shape[0]
+
+            YTY = Yk.T.dot(np.diag(self.Items_weight)).dot(Yk)
+
+            Bc = self.imputation_value * self.Items_weight.dot(Yk)
+            Bd = (self.Items_weight * Yk).dot(self.Items)
+            Be = (self.Items_weight * Yk).dot(self.Items[:,f_dim])
+
+            for i in range(x):
+                v = self.User_Items[i]['ratings_temp']
+                r = self.User_Items[i]['ratings']
+                w = 1
+                x = self.Users[i]
+                Xk[i] = self.coo_descent_inner(self.User_Items[i]['ids'] ,v, r, w, x, f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be)
+
+        else:
+            x = self.Items.shape[0]
+            y = self.Users.shape[0]
+
+            YTY = Yk.T.dot(np.eye(self.no_Users)).dot(Yk)
+
+            Bc = self.imputation_value * sum(Yk)
+            Bd = (Yk).dot(self.Users)
+            Be = (Yk).dot(self.Users[:,f_dim])
+
+            for i in range(x):
+                v = self.Item_Users[i]['ratings_temp']
+                r = self.Item_Users[i]['ratings']
+                w = self.Items_weight[i]
+                x = self.Items[i]
+                Xk[i] = self.coo_descent_inner(self.Item_Users[i]['ids'], v, r, w, x, f_dim, np.ones(len(self.Item_Users[i]['weights'])), Yk, YTY, self.lambda_, Bc, Bd, Be)
 
 
-    def users_factor(self, batch):
-        VV = self.VV
-        U = self.Users
-        V = self.Items
-        lambda_, r_m = self.lambda_, self.imputation_value
-        
-        weight, no_factors,no_Users = self.weight, self.no_factors, self.no_Users
-        eye = np.eye(no_factors)
-        d = now()
-        for u in batch:
-            u_rated = self.User_Items[u]['ids']
-            V_s = V[u_rated,:]
-            Wu = np.array([self.User_Items[u]['weights']])
-
-            lM = (np.asmatrix(self.User_Items[u]['ratings']) - r_m).dot(np.multiply(Wu.T.dot(np.ones((1,no_factors))), V_s))
-            rM = VV - (weight*V_s.T).dot(V_s) + np.multiply(V_s.T, np.ones((no_factors,1)).dot(Wu)).dot(V_s)
-            reg = lambda_ * (weight * (no_Users-Wu.shape[0]) + (Wu-weight).sum()) * eye
-            res = np.linalg.solve(rM+reg,lM.T)
-            #Update latentniho vektoru users matice
-            U[u,:] = res.flatten()
-        print("USER TIME ", now() - d)
     '''
     OPTIMIZE RMSE
     '''
@@ -399,7 +418,7 @@ class MatrixFactorization:
         step_item = int(np.ceil(len(self.Items)/float(self.no_processes)))
         step_user = int(np.ceil(len(self.Users)/float(self.no_processes)))
 
-        #Rozdel do disjuktnich, stejne velikych varek
+        #Rozdel do disjuktnich, stejne velVkych varek
         item_range = [range(i,min(i+step_item, self.no_Items)) for i in range(0, self.no_Items, step_item)]
         user_range = [range(u,min(u+step_user, self.no_Users)) for u in range(0, self.no_Users, step_user)]
 
@@ -420,39 +439,41 @@ class MatrixFactorization:
 
             if(self.multiprocessing):
                 #ITEMS latent vectors
-                process = []
-                
-                d = now()
-                self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
-                print("UU ", now() - d)
-                
-                d = now()
-                for batch in item_range:
-                    p = Process(target = self.items_factor, args = (batch,))
-                    p.daemon = True
-                    process.append(p)
-                    p.start()
+                for f_dim in range(self.no_factors):
+                    Uk = self.Users[:,f_dim]
+                    Vk = self.Items[:,f_dim]
+                    for u_id in self.User_Items.keys():
+                        for i, i_id in enumerate(self.User_Items[u_id]['ids']):
+                            self.User_Items[u_id]['ratings_temp'][i] += Uk[u_id] * Vk[i_id]
 
-                [p.join() for p in process]
-                print("Item time",  now()-d)
+                    for i_id in self.Item_Users.keys():
+                        for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
+                            self.Item_Users[i_id]['ratings_temp'][u] += Uk[u_id] * Vk[i_id]
 
-                #USERS latent vectors
-                process = []
-                
-                d = now()
-                self.VV[:] = (self.weight*self.Items.T).dot(self.Items)
-                print("VV ", now() - d)
-                
-                d = now()
-                for batch in user_range:
-                    p = Process(target = self.users_factor, args = (batch,))
-                    p.daemon = True
-                    process.append(p)
-                    p.start()
+                    for i in range(5):
+                        self.coo_descent_outer(Uk, Vk, f_dim, user_tag = True)
+                        self.coo_descent_outer(Vk, Uk, f_dim, user_tag =  False)
 
-                [p.join() for p in process]
-                print("User time ",  now()-d)
+                    for u_id in self.User_Items.keys():
+                        for i, i_id in enumerate(self.User_Items[u_id]['ids']):
+                            self.User_Items[u_id]['ratings_temp'][i] -= Uk[u_id] * Vk[i_id]
 
+                    for i_id in self.Item_Users.keys():
+                        for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
+                            self.Item_Users[i_id]['ratings_temp'][u] -= Uk[u_id] * Vk[i_id]
+
+                    self.Users[:,f_dim] = Uk
+                    self.Items[:,f_dim] = Vk
+
+    
+                # process = []
+                # d = now()
+                #                #     p = Process(target = self.items_factor, args = (batch,))
+                                #     p.daemon = True
+                                #     process.append(p)
+                                #     p.start()
+                                #
+                                # [p.join() for p in process]
             else:
                 print("Single process")
                 self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
@@ -579,7 +600,7 @@ class MatrixFactorization:
             atop_suffix = "_ATOP:"+str(self.ATOPv)
         else:
             atop_suffix =""
-            
+
         with open(data_path+"MATRICES/"+ndataset+"/"+ndataset+str(no_fold)+"_model_f:"+str(no_factors)+"l:"+str(lambda_)+"w:"+str(weight)+"b:"+str(self.beta)+"r:"+str(self.imputation_value)+atop_suffix+".txt", 'w') as f:
             f.write("m "+str(self.Users.shape[0])+"\n")
             f.write("n "+str(self.Items.shape[0])+"\n")
@@ -658,10 +679,3 @@ if __name__ == "__main__":
 
 
 # In[ ]:
-
-ITEM TIME  0:00:03.226633
-ITEM TIME  0:00:03.417261
-ITEM TIME  0:00:03.701171
-ITEM TIME  0:00:03.598445
-ITEM TIME  0:00:03.758560
-
