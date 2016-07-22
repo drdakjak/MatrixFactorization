@@ -11,6 +11,7 @@ plt.style.use('ggplot')
 from multiprocessing import Process, Pool
 import multiprocessing
 from scipy.linalg import solve
+import functools
 
 import time
 import timeit
@@ -195,9 +196,9 @@ class MatrixFactorization:
 
                 if(matrix.shape[1]>3):
                     if(user_tag):
-                        dict_[key]['weights'].append(1)
-                    else:
                         dict_[key]['weights'].append(weight)
+                    else:
+                        dict_[key]['weights'].append(1)
 
             except:
                 dict_[key] = {'ids':[], 'ratings':[], 'weights':[], 'ratings_temp':[]}
@@ -357,19 +358,16 @@ class MatrixFactorization:
     '''
 
     def coo_descent_inner(self,v_ids, v, r, w, x, k, Wy, Y, YTY, LI, Bc, Bd, Be):
-        A = 0
-        for i, id_ in enumerate(v_ids):
-            A += (1 - w*Wy[i]) * np.dot(Y[id_:id_+1].T, Y[id_:id_+1])
 
-        B = 0
-        for i, id_ in enumerate(v_ids):
-            B += (1 - w*Wy[i]) * Y[id_] * v[i]
-            B += w*Wy[i] * (r[i] - self.imputation_value) * Y[id_]
+
+        A = functools.reduce(lambda x,y: x+y , (1 - np.array(w*Wy)) * Y[v_ids] * Y[v_ids])
+        B = functools.reduce(lambda x,y: x+y , ((1 - np.array(w*Wy))  * v + w*Wy * (np.array(r) - self.imputation_value) )* Y[v_ids] )
 
         return (B + w*(Bc - x.dot(Bd) + x[k]*Be)) / (A + w*YTY + LI)
 
     def coo_descent_outer(self, Xk, Yk, f_dim, user_tag = True):
         if(user_tag):
+            d = now()
             x = self.Users.shape[0]
             y = self.Items.shape[0]
 
@@ -378,14 +376,22 @@ class MatrixFactorization:
             Bc = self.imputation_value * self.Items_weight.dot(Yk)
             Bd = (self.Items_weight * Yk).dot(self.Items)
             Be = (self.Items_weight * Yk).dot(self.Items[:,f_dim])
+            print("Pre: ", now() -d)
 
-            for i in range(x):
-                v = self.User_Items[i]['ratings_temp']
-                r = self.User_Items[i]['ratings']
-                w = 1
-                x = self.Users[i]
-                Xk[i] = self.coo_descent_inner(self.User_Items[i]['ids'] ,v, r, w, x, f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be)
+            timer = []
+            # for i in range(x):
+            #     v = self.User_Items[i]['ratings_temp']
+            #     r = self.User_Items[i]['ratings']
+            #     w = 1
+            #     x = self.Users[i]
+            #     d = now()
+            #     Xk[i] = self.coo_descent_inner(self.User_Items[i]['ids'] ,v, r, w, x, f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be)
+            d = now()
+            Xk = list(map(lambda i: self.coo_descent_inner(self.User_Items[i]['ids'] , self.User_Items[i]['ratings_temp'], self.User_Items[i]['ratings'],
+                                                        1, self.Users[i], f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be), range(x)))
 
+            timer.append(now()-d)
+            print("Inner:", np.array(timer).sum())
         else:
             x = self.Items.shape[0]
             y = self.Users.shape[0]
@@ -439,7 +445,9 @@ class MatrixFactorization:
 
             if(self.multiprocessing):
                 #ITEMS latent vectors
+                d = now()
                 for f_dim in range(self.no_factors):
+                    print("Fdim ", f_dim)
                     Uk = self.Users[:,f_dim]
                     Vk = self.Items[:,f_dim]
                     for u_id in self.User_Items.keys():
@@ -449,11 +457,11 @@ class MatrixFactorization:
                     for i_id in self.Item_Users.keys():
                         for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
                             self.Item_Users[i_id]['ratings_temp'][u] += Uk[u_id] * Vk[i_id]
-
+                    print("Update ratings +")
                     for i in range(5):
                         self.coo_descent_outer(Uk, Vk, f_dim, user_tag = True)
                         self.coo_descent_outer(Vk, Uk, f_dim, user_tag =  False)
-
+                    print("Update latent feature")
                     for u_id in self.User_Items.keys():
                         for i, i_id in enumerate(self.User_Items[u_id]['ids']):
                             self.User_Items[u_id]['ratings_temp'][i] -= Uk[u_id] * Vk[i_id]
@@ -461,11 +469,12 @@ class MatrixFactorization:
                     for i_id in self.Item_Users.keys():
                         for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
                             self.Item_Users[i_id]['ratings_temp'][u] -= Uk[u_id] * Vk[i_id]
-
+                    print("Update ratings -")
                     self.Users[:,f_dim] = Uk
                     self.Items[:,f_dim] = Vk
 
-    
+
+
                 # process = []
                 # d = now()
                 #                #     p = Process(target = self.items_factor, args = (batch,))
@@ -483,7 +492,7 @@ class MatrixFactorization:
                 for batch in user_range:
                     self.users_factor(batch,)
 
-
+            print("Iter:", now()-d)
             print(ii,end=";")
             #vypocti RMSE na training set
 #                 weighted_errors.append(self.RMSE(self.Item_Users))
@@ -651,12 +660,12 @@ if __name__ == "__main__":
         MFact = MatrixFactorization(trainset, testset, no_fold = no_fold , test_size = test_size, relevant = relevant, ndataset = ndataset,
                                     users_str2int= users_str2int, items_str2int = items_str2int)
         #[0, 0.0008, 0.001, 0.0015 ,0.002, 0.005, 0.01, 0.02]
-        for lambda_ in [0, 0.001, 0.005, 0.008, 0.01]: #iteruj pres lambda
+        for lambda_ in [ 0.001, 0.005, 0.008, 0.01]: #iteruj pres lambda
             #[1, 2, 5, 10, 30, 50, 100,200, 300],
             for no_factor in [30,100]: # iteruj pres delku latentnich vektoru
                 for no_iterations in [6]: #iteruj pres pocet iteraci alternating least square
                     #[-2,-1,-0.5,-0.2,0, 0.2, 0.5, 1, 2]
-                    for beta in [0, 0.1, 0.2]:
+                    for beta in [0.2]:
                         for weight in [0.02, 0.05, 0.08, 0.1]:
                             for imputation_value in [0, 0.01]:
                                 for p in [5]:
