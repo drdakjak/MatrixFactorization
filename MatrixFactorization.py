@@ -39,7 +39,7 @@ now = lambda: datetime.datetime.now()
 # In[ ]:
 
 directory = 'sample-data-v2/'
-ndataset = 'movielens_1m'#"movielens_1m"
+ndataset = 'goout'#"movielens_1m"
 data_path = '/home/kuba/ownCloud/Recombee/'
 
 
@@ -59,7 +59,6 @@ with open(data_path+directory+ndataset+"/users.str2int.json",'r') as f:
     users_str2int = json.loads(f.read())
 
 dataset = pd.read_csv(data_path+directory+ndataset+"/ratings.csv",  ) #dtype = {'rating': np.float, 'itemId': str, 'userId':str}
-# ratings = SFrame.read_csv("/home/kuba/ownCloud/ModGen-fac-mat/sample-data-v2/"+ndataset+"/ratings.csv", column_type_hints=[str,str,float] )
 with open(data_path+directory+ndataset+"/items.int2str.json",'r') as f:
     items_int2str = json.loads(f.read())
 
@@ -356,9 +355,25 @@ class MatrixFactorization:
     '''
     LATENT FACTORS
     '''
+    def multiprocessing_coo_descent_inner_USER (self, batch, Xk, Yk, YTY, Bc, Bd, Be, f_dim):
+        for i in batch:
+            v = self.User_Items[i]['ratings_temp']
+            r = self.User_Items[i]['ratings']
+            w = 1
+            x = self.Users[i]
+            Xk[i] = self.coo_descent_inner(self.User_Items[i]['ids'] ,v, r, w, x, f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be)
+
+    def multiprocessing_coo_descent_inner_ITEM (self, batch, Xk, Yk, YTY, Bc, Bd, Be, f_dim):
+        for i in batch:
+            v = self.Item_Users[i]['ratings_temp']
+            r = self.Item_Users[i]['ratings']
+            w = self.Items_weight[i]
+            x = self.Items[i]
+            Xk[i] = self.coo_descent_inner(self.Item_Users[i]['ids'], v, r, w, x, f_dim, np.ones(len(self.Item_Users[i]['weights'])), Yk, YTY, self.lambda_, Bc, Bd, Be)
+
+
 
     def coo_descent_inner(self,v_ids, v, r, w, x, k, Wy, Y, YTY, LI, Bc, Bd, Be):
-
 
         A = functools.reduce(lambda x,y: x+y , (1 - np.array(w*Wy)) * Y[v_ids] * Y[v_ids])
         B = functools.reduce(lambda x,y: x+y , ((1 - np.array(w*Wy))  * v + w*Wy * (np.array(r) - self.imputation_value) )* Y[v_ids] )
@@ -367,47 +382,51 @@ class MatrixFactorization:
 
     def coo_descent_outer(self, Xk, Yk, f_dim, user_tag = True):
         if(user_tag):
-            d = now()
             x = self.Users.shape[0]
             y = self.Items.shape[0]
 
-            YTY = Yk.T.dot(np.diag(self.Items_weight)).dot(Yk)
+            YTY = (Yk*self.Items_weight).T.dot(Yk)
 
             Bc = self.imputation_value * self.Items_weight.dot(Yk)
             Bd = (self.Items_weight * Yk).dot(self.Items)
             Be = (self.Items_weight * Yk).dot(self.Items[:,f_dim])
-            print("Pre: ", now() -d)
 
-            timer = []
-            # for i in range(x):
-            #     v = self.User_Items[i]['ratings_temp']
-            #     r = self.User_Items[i]['ratings']
-            #     w = 1
-            #     x = self.Users[i]
-            #     d = now()
-            #     Xk[i] = self.coo_descent_inner(self.User_Items[i]['ids'] ,v, r, w, x, f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be)
+            step_x = int(np.ceil(x/float(self.no_processes)))
+            x_range = [range(i,min(i+step_x, x)) for i in range(0, x, step_x)]
+
+            process = []
             d = now()
-            Xk = list(map(lambda i: self.coo_descent_inner(self.User_Items[i]['ids'] , self.User_Items[i]['ratings_temp'], self.User_Items[i]['ratings'],
-                                                        1, self.Users[i], f_dim, self.User_Items[i]['weights'] , Yk, YTY, self.lambda_, Bc, Bd, Be), range(x)))
+            for batch in x_range:
+                p = Process(target = self.multiprocessing_coo_descent_inner_USER, args = (batch, Xk, Yk, YTY, Bc, Bd, Be, f_dim,))
+                p.daemon = True
+                process.append(p)
+                p.start()
 
-            timer.append(now()-d)
-            print("Inner:", np.array(timer).sum())
+            [p.join() for p in process]
+
         else:
             x = self.Items.shape[0]
             y = self.Users.shape[0]
 
-            YTY = Yk.T.dot(np.eye(self.no_Users)).dot(Yk)
+            YTY = Yk.T.dot(Yk)
 
             Bc = self.imputation_value * sum(Yk)
             Bd = (Yk).dot(self.Users)
             Be = (Yk).dot(self.Users[:,f_dim])
 
-            for i in range(x):
-                v = self.Item_Users[i]['ratings_temp']
-                r = self.Item_Users[i]['ratings']
-                w = self.Items_weight[i]
-                x = self.Items[i]
-                Xk[i] = self.coo_descent_inner(self.Item_Users[i]['ids'], v, r, w, x, f_dim, np.ones(len(self.Item_Users[i]['weights'])), Yk, YTY, self.lambda_, Bc, Bd, Be)
+            step_x = int(np.ceil(x/float(self.no_processes)))
+            x_range = [range(i,min(i+step_x, x)) for i in range(0, x, step_x)]
+
+            process = []
+            d = now()
+            for batch in x_range:
+                p = Process(target = self.multiprocessing_coo_descent_inner_ITEM, args = (batch, Xk, Yk, YTY, Bc, Bd, Be, f_dim,))
+                p.daemon = True
+                process.append(p)
+                p.start()
+
+            [p.join() for p in process]
+
 
 
     '''
@@ -421,12 +440,6 @@ class MatrixFactorization:
         weighted_errors = []
         ATOPs = []
 
-        step_item = int(np.ceil(len(self.Items)/float(self.no_processes)))
-        step_user = int(np.ceil(len(self.Users)/float(self.no_processes)))
-
-        #Rozdel do disjuktnich, stejne velVkych varek
-        item_range = [range(i,min(i+step_item, self.no_Items)) for i in range(0, self.no_Items, step_item)]
-        user_range = [range(u,min(u+step_user, self.no_Users)) for u in range(0, self.no_Users, step_user)]
 
         print("*******************************")
         print("Lambda: ", self.lambda_)
@@ -442,57 +455,35 @@ class MatrixFactorization:
 #         self.Trainset = None
 
         for ii in range(self.no_iterations):
+            d = now()
+            for f_dim in range(self.no_factors):
+                print("Fdim ", f_dim)
+                Uk = self.Users[:,f_dim]
+                Vk = self.Items[:,f_dim]
+                for u_id in self.User_Items.keys():
+                    for i, i_id in enumerate(self.User_Items[u_id]['ids']):
+                        self.User_Items[u_id]['ratings_temp'][i] += Uk[u_id] * Vk[i_id]
 
-            if(self.multiprocessing):
-                #ITEMS latent vectors
-                d = now()
-                for f_dim in range(self.no_factors):
-                    print("Fdim ", f_dim)
-                    Uk = self.Users[:,f_dim]
-                    Vk = self.Items[:,f_dim]
-                    for u_id in self.User_Items.keys():
-                        for i, i_id in enumerate(self.User_Items[u_id]['ids']):
-                            self.User_Items[u_id]['ratings_temp'][i] += Uk[u_id] * Vk[i_id]
+                for i_id in self.Item_Users.keys():
+                    for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
+                        self.Item_Users[i_id]['ratings_temp'][u] += Uk[u_id] * Vk[i_id]
+                print("Update ratings +")
+                for i in range(5):
+                    self.coo_descent_outer(Uk, Vk, f_dim, user_tag = True)
+                    self.coo_descent_outer(Vk, Uk, f_dim, user_tag =  False)
+                print("Update latent feature")
+                for u_id in self.User_Items.keys():
+                    for i, i_id in enumerate(self.User_Items[u_id]['ids']):
+                        self.User_Items[u_id]['ratings_temp'][i] -= Uk[u_id] * Vk[i_id]
 
-                    for i_id in self.Item_Users.keys():
-                        for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
-                            self.Item_Users[i_id]['ratings_temp'][u] += Uk[u_id] * Vk[i_id]
-                    print("Update ratings +")
-                    for i in range(5):
-                        self.coo_descent_outer(Uk, Vk, f_dim, user_tag = True)
-                        self.coo_descent_outer(Vk, Uk, f_dim, user_tag =  False)
-                    print("Update latent feature")
-                    for u_id in self.User_Items.keys():
-                        for i, i_id in enumerate(self.User_Items[u_id]['ids']):
-                            self.User_Items[u_id]['ratings_temp'][i] -= Uk[u_id] * Vk[i_id]
+                for i_id in self.Item_Users.keys():
+                    for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
+                        self.Item_Users[i_id]['ratings_temp'][u] -= Uk[u_id] * Vk[i_id]
+                print("Update ratings -")
+                self.Users[:,f_dim] = Uk
+                self.Items[:,f_dim] = Vk
 
-                    for i_id in self.Item_Users.keys():
-                        for u, u_id in enumerate(self.Item_Users[i_id]['ids']):
-                            self.Item_Users[i_id]['ratings_temp'][u] -= Uk[u_id] * Vk[i_id]
-                    print("Update ratings -")
-                    self.Users[:,f_dim] = Uk
-                    self.Items[:,f_dim] = Vk
-
-
-
-                # process = []
-                # d = now()
-                #                #     p = Process(target = self.items_factor, args = (batch,))
-                                #     p.daemon = True
-                                #     process.append(p)
-                                #     p.start()
-                                #
-                                # [p.join() for p in process]
-            else:
-                print("Single process")
-                self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
-                for batch in item_range:
-                    self.items_factor(batch,)
-                self.VV[:] = (self.weight*self.Items.T).dot(self.Items)
-                for batch in user_range:
-                    self.users_factor(batch,)
-
-            print("Iter:", now()-d)
+            print("Iter time:", now()-d)
             print(ii,end=";")
             #vypocti RMSE na training set
 #                 weighted_errors.append(self.RMSE(self.Item_Users))
