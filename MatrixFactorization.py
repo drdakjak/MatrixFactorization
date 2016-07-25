@@ -67,11 +67,11 @@ with open(data_path+directory+ndataset+"/items.str2int.json",'r') as f:
 
 
 
-def split_dataset(dataset, test_size, relevant):        
+def split_dataset(dataset, test_size, relevant):
     dataset["Testset"] = False
     if(test_size == 0):
-        return dataset[dataset.Testset==False], dataset[dataset.Testset==True] 
-    
+        return dataset[dataset.Testset==False], dataset[dataset.Testset==True]
+
     relevant_ = dataset.loc[dataset['rating']>=relevant]
     test_indices = []
     for key, user_relevant in relevant_.groupby('userId'):
@@ -345,22 +345,23 @@ class MatrixFactorization:
         U = self.Users
         UU = self.UU
         lambda_, r_m  = self.lambda_, self.imputation_value,
-        
+
         weight, no_factors,no_Items = self.weight, self.no_factors, self.no_Items
         eye = np.eye(no_factors)
         d = now()
         for i in batch:
-            i_rated = self.Item_Users[i]['ids']
-            U_s = U[i_rated,:]
-            Wi = np.array([self.Item_Users[i]['weights']])
+            item_users = self.Item_Users[i]
+            i_rated = item_users['ids']
+            U_s = np.take(U, i_rated, axis=0)
 
-            lM = (np.asmatrix(self.Item_Users[i]['ratings']) - r_m).dot(np.multiply(Wi.T.dot(np.ones((1,no_factors))), U_s))
+            Wi = np.array([item_users['weights']])
+
+            lM = (np.array([item_users['ratings']]) - r_m).dot(np.multiply(Wi.T.dot(np.ones((1,no_factors))), U_s))
             rM = UU - (weight*U_s.T).dot(U_s) + np.multiply(U_s.T,  np.ones((no_factors,1)).dot(Wi)).dot(U_s)
-
             reg = lambda_ * (weight * (no_Items-len(Wi)) + (Wi-weight).sum()) * eye
             res = np.linalg.solve(rM+reg,lM.T)
             #Update latentniho vektoru items matice
-            V[i,:] = res.flatten()
+            V[i,:] = res.ravel()
         print("ITEM TIME ", now() - d)
 
 
@@ -369,22 +370,26 @@ class MatrixFactorization:
         U = self.Users
         V = self.Items
         lambda_, r_m = self.lambda_, self.imputation_value
-        
+
         weight, no_factors,no_Users = self.weight, self.no_factors, self.no_Users
         eye = np.eye(no_factors)
         d = now()
         for u in batch:
-            u_rated = self.User_Items[u]['ids']
-            V_s = V[u_rated,:]
-            Wu = np.array([self.User_Items[u]['weights']])
+            user_items = self.User_Items[u]
+            u_rated = user_items['ids']
 
-            lM = (np.asmatrix(self.User_Items[u]['ratings']) - r_m).dot(np.multiply(Wu.T.dot(np.ones((1,no_factors))), V_s))
+            V_s = np.take(V, u_rated, axis=0)
+
+            Wu = np.array([user_items['weights']])
+
+            lM = (np.array([user_items['ratings']]) - r_m).dot(np.multiply(Wu.T.dot(np.ones((1,no_factors))), V_s))
             rM = VV - (weight*V_s.T).dot(V_s) + np.multiply(V_s.T, np.ones((no_factors,1)).dot(Wu)).dot(V_s)
             reg = lambda_ * (weight * (no_Users-Wu.shape[0]) + (Wu-weight).sum()) * eye
             res = np.linalg.solve(rM+reg,lM.T)
             #Update latentniho vektoru users matice
-            U[u,:] = res.flatten()
+            U[u,:] = res.ravel()
         print("USER TIME ", now() - d)
+
     '''
     OPTIMIZE RMSE
     '''
@@ -421,11 +426,11 @@ class MatrixFactorization:
             if(self.multiprocessing):
                 #ITEMS latent vectors
                 process = []
-                
+
                 d = now()
                 self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
                 print("UU ", now() - d)
-                
+
                 d = now()
                 for batch in item_range:
                     p = Process(target = self.items_factor, args = (batch,))
@@ -438,11 +443,11 @@ class MatrixFactorization:
 
                 #USERS latent vectors
                 process = []
-                
+
                 d = now()
                 self.VV[:] = (self.weight*self.Items.T).dot(self.Items)
                 print("VV ", now() - d)
-                
+
                 d = now()
                 for batch in user_range:
                     p = Process(target = self.users_factor, args = (batch,))
@@ -579,7 +584,7 @@ class MatrixFactorization:
             atop_suffix = "_ATOP:"+str(self.ATOPv)
         else:
             atop_suffix =""
-            
+
         with open(data_path+"MATRICES/"+ndataset+"/"+ndataset+str(no_fold)+"_model_f:"+str(no_factors)+"l:"+str(lambda_)+"w:"+str(weight)+"b:"+str(self.beta)+"r:"+str(self.imputation_value)+atop_suffix+".txt", 'w') as f:
             f.write("m "+str(self.Users.shape[0])+"\n")
             f.write("n "+str(self.Items.shape[0])+"\n")
@@ -655,13 +660,3 @@ if __name__ == "__main__":
 
 # %load_ext line_profiler
 # %lprun -f MFact.users_factor MFact.users_factor(range(0,1000))
-
-
-# In[ ]:
-
-ITEM TIME  0:00:03.226633
-ITEM TIME  0:00:03.417261
-ITEM TIME  0:00:03.701171
-ITEM TIME  0:00:03.598445
-ITEM TIME  0:00:03.758560
-
