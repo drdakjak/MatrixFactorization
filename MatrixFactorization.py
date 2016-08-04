@@ -38,8 +38,8 @@ now = lambda: datetime.datetime.now()
 # In[ ]:
 
 directory = 'sample-data-v2/'
-ndataset = 'goout'#"movielens_1m"
-data_path = '/home/kuba/ownCloud/Recombee/'
+ndataset = 'movielens_1m'#'jobs-cz'#"movielens_1m"
+data_path = '/root/jdrdak-src/'
 
 
 with open(data_path+directory+ndataset+"/items.json",'r') as f:
@@ -65,7 +65,8 @@ with open(data_path+directory+ndataset+"/items.int2str.json",'r') as f:
 with open(data_path+directory+ndataset+"/items.str2int.json",'r') as f:
     items_str2int = json.loads(f.read())
 
-
+# from collections import Counter
+# print(Counter(dataset['rating']))
 
 def split_dataset(dataset, test_size, relevant):
     dataset["Testset"] = False
@@ -224,22 +225,28 @@ class MatrixFactorization:
     INIT
     '''
     def init(self):
+        from sys import getsizeof
         """ Inicializace matice latentnich vektoru users a items. Inicializace matice U.T*U a V.T*V"""
         if(self.random_init):#Chci nahodne inicializovat latentni vektory pri zapoceti optimalizace s jinymi parametry?
             if(self.multiprocessing):#Chci pouzit multiprocessing?
                 #print("START INIT USER AND ITEMS FEATURE VECTORES")
                 #Nehrozi paralelni pristup ke sdilenym zdrojum(radkum matice), neni potreba zamykat. Kazdy proces ma urcenou mnozinu radku, ktere updatuje.
-                user_shared_array = np.frombuffer(multiprocessing.Array(ctypes.c_double, np.random.rand(self.no_Users * self.no_factors), lock=False),dtype=float)
-                #Matice latentnich vektoru
+                user_shared_array = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_Users * self.no_factors), lock=False),dtype=np.float32)
                 self.Users = user_shared_array.reshape(self.no_Users, self.no_factors)
+                print("USER SIZE FLOAT", self.Users.nbytes, "bytes")
 
-                item_shared_array = np.frombuffer(multiprocessing.Array(ctypes.c_double, np.random.rand(self.no_Items * self.no_factors), lock= False),dtype=float)
+                item_shared_array = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_Items * self.no_factors), lock= False),dtype=np.float32)
                 self.Items = item_shared_array.reshape(self.no_Items, self.no_factors)
+                print("ITEM SIZE FLOAT", self.Items.nbytes, "bytes")
 
                 #Matice sdilena vsemi procesory U.T * U
-                self.UU = np.frombuffer(multiprocessing.Array(ctypes.c_double, np.zeros(self.no_factors * self.no_factors), lock= False),dtype=float).reshape(self.no_factors, self.no_factors)
-                self.VV = np.frombuffer(multiprocessing.Array(ctypes.c_double, np.zeros(self.no_factors * self.no_factors), lock= False),dtype=float).reshape(self.no_factors, self.no_factors)
+                self.UU = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_factors * self.no_factors), lock= False),dtype=np.float32).reshape(self.no_factors, self.no_factors)
+                print("UU SIZE FLOAT", self.UU.nbytes, "bytes")
+                self.VV = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_factors * self.no_factors), lock= False),dtype=np.float32).reshape(self.no_factors, self.no_factors)
+                print("VV SIZE FLOAT", self.VV.nbytes, "bytes")
                 #print("FINISH INIT USER AND ITEMS FEATURE VECTORES")
+
+
             else:
                 self.Users = np.random.rand(self.no_Users, self.no_factors)
                 self.Items = np.random.rand(self.no_Items, self.no_factors)
@@ -347,16 +354,16 @@ class MatrixFactorization:
         lambda_, r_m  = self.lambda_, self.imputation_value,
 
         weight, no_factors,no_Items = self.weight, self.no_factors, self.no_Items
-        eye = np.eye(no_factors)
+        eye = np.eye(no_factors, dtype=np.float32)
         d = now()
         for i in batch:
             item_users = self.Item_Users[i]
             i_rated = item_users['ids']
             U_s = np.take(U, i_rated, axis=0)
 
-            Wi = np.array([item_users['weights']])
+            Wi = np.array([item_users['weights']], dtype = np.float32)
 
-            lM = (np.array([item_users['ratings']]) - r_m).dot(np.multiply(Wi.T.dot(np.ones((1,no_factors))), U_s))
+            lM = (np.array([item_users['ratings']], dtype = np.float32) - r_m).dot(np.multiply(Wi.T.dot(np.ones((1,no_factors))), U_s))
             rM = UU - (weight*U_s.T).dot(U_s) + np.multiply(U_s.T,  np.ones((no_factors,1)).dot(Wi)).dot(U_s)
             reg = lambda_ * (weight * (no_Items-len(Wi)) + (Wi-weight).sum()) * eye
             res = np.linalg.solve(rM+reg,lM.T)
@@ -372,7 +379,7 @@ class MatrixFactorization:
         lambda_, r_m = self.lambda_, self.imputation_value
 
         weight, no_factors,no_Users = self.weight, self.no_factors, self.no_Users
-        eye = np.eye(no_factors)
+        eye = np.eye(no_factors, dtype = np.float32)
         d = now()
         for u in batch:
             user_items = self.User_Items[u]
@@ -380,9 +387,9 @@ class MatrixFactorization:
 
             V_s = np.take(V, u_rated, axis=0)
 
-            Wu = np.array([user_items['weights']])
+            Wu = np.array([user_items['weights']], dtype = np.float32)
 
-            lM = (np.array([user_items['ratings']]) - r_m).dot(np.multiply(Wu.T.dot(np.ones((1,no_factors))), V_s))
+            lM = (np.array([user_items['ratings']], dtype = np.float32) - r_m).dot(np.multiply(Wu.T.dot(np.ones((1,no_factors))), V_s))
             rM = VV - (weight*V_s.T).dot(V_s) + np.multiply(V_s.T, np.ones((no_factors,1)).dot(Wu)).dot(V_s)
             reg = lambda_ * (weight * (no_Users-Wu.shape[0]) + (Wu-weight).sum()) * eye
             res = np.linalg.solve(rM+reg,lM.T)
@@ -430,7 +437,7 @@ class MatrixFactorization:
                 d = now()
                 self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
                 print("UU ", now() - d)
-
+                print(self.Items[0])
                 d = now()
                 for batch in item_range:
                     p = Process(target = self.items_factor, args = (batch,))
@@ -440,7 +447,7 @@ class MatrixFactorization:
 
                 [p.join() for p in process]
                 print("Item time",  now()-d)
-
+                print(self.Items[0])
                 #USERS latent vectors
                 process = []
 
@@ -472,7 +479,7 @@ class MatrixFactorization:
             #vypocti RMSE na training set
 #                 weighted_errors.append(self.RMSE(self.Item_Users))
             #vypocti RMSE na testset
-            if((self.no_iterations-1) == ii):
+            if True: #((self.no_iterations-1) == ii):
                 d = now()
                 rmse = self.RMSE(self.Item_Users)
                 #vypocti ATOP
@@ -594,15 +601,15 @@ class MatrixFactorization:
             for idx, laten_vec in enumerate(self.Users):
                 string_idx = user_map[idx]
                 idf = self.users_str2int[string_idx]
-                f.write("p"+str(idf)+" "+' '.join(list(laten_vec.astype('str')))+"\n")
+                f.write("p"+str(idf)+" "+' '.join(list(map(str,laten_vec)))+"\n")
 
             item_map = {v: k for k, v in self.item_map_dict.items()}
             for idx, laten_vec in enumerate(self.Items):
                 string_idx = item_map[idx]
                 idf = self.items_str2int[string_idx]
-                f.write("q"+str(idf)+" "+' '.join(list(laten_vec.astype('str')))+"\n")
+                f.write("q"+str(idf)+" "+' '.join(list(map(str,laten_vec)))+"\n")
 
-        #print("************ UKLADANI MATICE ", now()-d)
+        print("************ UKLADANI MATICE ", now()-d)
 
 def NRANKs_u(args):
     """Vypocti normalizovany rank pro uzivatele.
@@ -627,7 +634,7 @@ if __name__ == "__main__":
     SAVE_MATRIX = True
     ATOP = False
     #[0,1,2,3,4,5,6,7,8,9]
-    for no_fold in [0,1,2,3,4,5,6,7,8,9]:  #iteruj pres testovaci slozky
+    for no_fold in [2,3,4,5,6,7,8,9]:  #iteruj pres testovaci slozky
         #odstran z datasetu testovaci users obsazene ve slozce
         ratings = dataset[~dataset.userId.isin(user_folds[no_fold])]
         trainset, testset = split_dataset(ratings.copy(),test_size = test_size, relevant = relevant)
@@ -635,15 +642,15 @@ if __name__ == "__main__":
         MFact = MatrixFactorization(trainset, testset, no_fold = no_fold , test_size = test_size, relevant = relevant, ndataset = ndataset,
                                     users_str2int= users_str2int, items_str2int = items_str2int)
         #[0, 0.0008, 0.001, 0.0015 ,0.002, 0.005, 0.01, 0.02]
-        for lambda_ in [0, 0.001, 0.005, 0.008, 0.01]: #iteruj pres lambda
+        for lambda_ in [0.001, 0.008, 0.01]: #iteruj pres lambda
             #[1, 2, 5, 10, 30, 50, 100,200, 300],
-            for no_factor in [30,100]: # iteruj pres delku latentnich vektoru
+            for no_factor in [256]:# [20,50,100]: # iteruj pres delku latentnich vektoru
                 for no_iterations in [6]: #iteruj pres pocet iteraci alternating least square
                     #[-2,-1,-0.5,-0.2,0, 0.2, 0.5, 1, 2]
-                    for beta in [0, 0.1, 0.2]:
-                        for weight in [0.02, 0.05, 0.08, 0.1]:
-                            for imputation_value in [0, 0.01]:
-                                for p in [5]:
+                    for beta in [0]:
+                        for weight in [0.01, 0.05, 0.1]:
+                            for imputation_value in [0]:
+                                for p in [12]:
                                     d = now()
                                     ATOP = MFact.optimaze(no_iterations = no_iterations,  lambda_ = lambda_, no_processes = p, no_factors = no_factor,
                                                           beta = beta,
