@@ -3,7 +3,6 @@ class MatrixFactorization:
     def __init__(self, trainset, testset, rowId, columnId, ratingId, relevant=None):
         import datetime
         import numpy as np
-
         
         self.now = lambda: datetime.datetime.now()
         self.ratingId = ratingId
@@ -83,6 +82,9 @@ class MatrixFactorization:
     '''
     def init(self):
         from sys import getsizeof
+        import multiprocessing
+        import ctypes
+
         """ Inicializace matice latentnich vektoru users a items. Inicializace matice U.T*U a V.T*V"""
         if(self.random_init):#Chci nahodne inicializovat latentni vektory pri zapoceti optimalizace s jinymi parametry?
             if(self.no_processes>1):#Chci pouzit multiprocessing?
@@ -231,7 +233,7 @@ class MatrixFactorization:
     '''
     def optimize_rmse(self):
         #inicializuj user/item matici latentnich vektoru a U.T * U, V.T * V (V: matice latentnich vektoru items)
-        
+        from multiprocessing import Process
         self.init()
         self.init_optimizer()
         
@@ -270,7 +272,6 @@ class MatrixFactorization:
                 d = self.now()
                 self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
                 print("UU ", self.now() - d)
-                print(self.Items[0])
                 d = self.now()
                 for batch in item_range:
                     p = Process(target = self.items_factor, args = (batch,))
@@ -280,7 +281,6 @@ class MatrixFactorization:
 
                 [p.join() for p in process]
                 print("Item time",  self.now()-d)
-                print(self.Items[0])
                 #USERS latent vectors
                 process = []
 
@@ -357,6 +357,7 @@ class MatrixFactorization:
     '''
     def plot_rmse(self):
         import matplotlib.pyplot as plt
+        plt.style.use('ggplot')
         %matplotlib inline
         weighted_errors = self.weighted_errors
         plt.plot(np.log(weighted_errors), label="weighted error: "+str(weighted_errors[-1]))
@@ -368,7 +369,10 @@ class MatrixFactorization:
 
     def explore(self):
         rating = self.rating
-        import matplotlib.pyplot as plt 
+        import matplotlib.pyplot as plt
+        plt.style.use('ggplot')
+        %matplotlib inline
+
         print("Explore trainset")
         no_ratings = self.Trainset.shape[0]
         no_missing = self.no_Users * self.no_Items - no_ratings
