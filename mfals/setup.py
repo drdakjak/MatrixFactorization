@@ -7,6 +7,6 @@ setup(name='mfals',
       author='Kokos',
       author_email='jak.drd@gmail.com',
       license='MIT',
-      packages=['mf'],
+      packages=['mfals'],
       zip_safe=False)
 
