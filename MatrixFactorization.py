@@ -1,142 +1,30 @@
-
-# coding: utf-8
-
-# In[ ]:
-
-#from IPython.core.display import display
-import pandas as pd
-import json
-import matplotlib.pyplot as plt
-plt.style.use('ggplot')
-from multiprocessing import Process, Pool
-import multiprocessing
-from scipy.linalg import solve
-
-import time
-import timeit
-
 import numpy as np
-import numba
-
-import ctypes
-import datetime
-from math import sqrt
-import platform
-platform.architecture()
-# %load_ext line_profiler
-import scipy
-import os
-# %load_ext Cython
-now = lambda: datetime.datetime.now()
-# %load_ext line_profiler
-
-# %matplotlib inline
-
-
-# # Nacteni dat
-
-# In[ ]:
-
-directory = 'sample-data-v2/'
-ndataset = 'movielens_1m'#'jobs-cz'#"movielens_1m"
-data_path = '/root/jdrdak-src/'
-
-
-with open(data_path+directory+ndataset+"/items.json",'r') as f:
-    items = json.loads(f.read())
-
-with open(data_path+directory+ndataset+"/properties.json",'r') as f:
-    properties = json.loads(f.read())
-
-with open(data_path+directory+ndataset+"/user.folds.json",'r') as f:
-    user_folds = json.loads(f.read())
-
-with open(data_path+directory+ndataset+"/users.int2str.json",'r') as f:
-    users_int2str = json.loads(f.read())
-
-with open(data_path+directory+ndataset+"/users.str2int.json",'r') as f:
-    users_str2int = json.loads(f.read())
-
-dataset = pd.read_csv(data_path+directory+ndataset+"/ratings.csv",  ) #dtype = {'rating': np.float, 'itemId': str, 'userId':str}
-# ratings = SFrame.read_csv("/home/kuba/ownCloud/ModGen-fac-mat/sample-data-v2/"+ndataset+"/ratings.csv", column_type_hints=[str,str,float] )
-with open(data_path+directory+ndataset+"/items.int2str.json",'r') as f:
-    items_int2str = json.loads(f.read())
-
-with open(data_path+directory+ndataset+"/items.str2int.json",'r') as f:
-    items_str2int = json.loads(f.read())
-
-# from collections import Counter
-# print(Counter(dataset['rating']))
-
-def split_dataset(dataset, test_size, relevant):
-    dataset["Testset"] = False
-    if(test_size == 0):
-        return dataset[dataset.Testset==False], dataset[dataset.Testset==True]
-
-    relevant_ = dataset.loc[dataset['rating']>=relevant]
-    test_indices = []
-    for key, user_relevant in relevant_.groupby('userId'):
-        if(user_relevant.shape[0]>=2):
-            indeces = user_relevant.index.tolist()
-            test_indices.extend(np.random.choice(indeces, int(np.ceil(len(indeces)*test_size)), replace = False))
-
-
-    dataset.loc[test_indices, "Testset"] = True
-    print("USER DONE")
-    testset = dataset[dataset.Testset==True]
-    trainset = dataset[dataset.Testset==False]
-
-    len_m  = 0
-    for key, trainset_ratings in dataset.groupby('itemId'):
-        if (np.all(trainset_ratings['Testset'])):
-
-            indeces = trainset_ratings.index.tolist()
-            rand = np.random.choice(indeces, int(np.ceil(len(indeces)*0.1)), replace = False)
-            len_m +=len(rand)
-            dataset.loc[rand, 'Testset'] = False
-
-    print("Move from test set to train set: ", len_m)
-
-    return dataset[dataset.Testset==False], dataset[dataset.Testset==True]
-
-
-# # Faktorizace
-
-# In[ ]:
+import multiprocessing
 
 class MatrixFactorization:
-    def __init__(self, trainset, testset, no_fold, relevant = .25, test_size = 0.2, ndataset= None,  users_str2int= None, items_str2int=None):
-        self.users_str2int, self.items_str2int = users_str2int, items_str2int
 
-        #hodnota, kdy je rating oznacen za relevantni
+    def __init__(self, trainset, testset, user, product, rating, relevant=None):
+        import datetime
+        self.user_id = user
+        self.product_id = product
+        self.rating_id = rating
+        
+        self.now = lambda: datetime.datetime.now()
+        self.rating = rating
         self.relevant = relevant
-        #velikost trenovaci mnoziny <0,1>
-        self.test_size = test_size
 
-        #slozka vyrazenych uzivatelu
-        self.no_fold = no_fold
-
-
-        #v init() prirazena matice latentnich vektoru
         self.Users = None
         self.Items = None
 
-        #nazev datasetu, cislo testovaci slozky
-        self.ndataset, self.no_fold = ndataset, no_fold
-
-        self.Trainset = trainset
-        self.Testset = testset
+        self.Trainset = trainset.copy()
+        self.Testset = testset.copy()
 
         self.no_ratings = self.Trainset.shape[0]
 
-        #mnozina users
-        self.Users_set = set([str(id_) for id_ in trainset['userId']])
-        #mnozina items
-        self.Items_set = set([str(id_) for id_ in trainset['itemId']])
-
-        #pocet users
+        self.Users_set = set([str(id_) for id_ in trainset[user]])
+        self.Items_set = set([str(id_) for id_ in trainset[product]])
+        
         self.no_Users = len(self.Users_set)
-        #pocet items
         self.no_Items = len(self.Items_set)
 
         #mapovaci dictonary, pro snadnejsi praci s poli user_string : uniqe number
@@ -144,81 +32,54 @@ class MatrixFactorization:
         self.item_map_dict = dict(zip(self.Items_set,range(self.no_Items)))
 
         #mapovaci lambda funkce list of users : list of mapped numbers
-        self.u_map = lambda users : list(map(lambda id_: self.user_map_dict[id_], users))
-        self.i_map = lambda items : list(map(lambda id_: self.item_map_dict[id_], items))
+        self.u_map = lambda users: list(map(lambda id_: self.user_map_dict[id_], users))
+        self.i_map = lambda items: list(map(lambda id_: self.item_map_dict[id_], items))
 
-        self.Trainset['userId_'] = self.Trainset['userId'].apply(lambda id_: self.user_map_dict[str(id_)])
-        self.Trainset['itemId_'] = self.Trainset['itemId'].apply(lambda id_: self.item_map_dict[str(id_)])
+        self.Trainset['user_'] = self.Trainset[user].apply(lambda id_: self.user_map_dict[str(id_)])
+        self.Trainset['product_'] = self.Trainset[product].apply(lambda id_: self.item_map_dict[str(id_)])
 
-
-        self.Testset['userId_'] = self.Testset['userId'].apply(lambda id_: self.user_map_dict[str(id_)])
-        self.Testset['itemId_'] = self.Testset['itemId'].apply(lambda id_: self.item_map_dict[str(id_)])
-
-#         self.Item_pop = self.item_pop(self.Trainset)
-
-
-        #TRAINSET se inicializuje az pri spusteni optimalizace
-
+        self.Testset['user_'] = self.Testset[user].apply(lambda id_: self.user_map_dict[str(id_)])
+        self.Testset['product_'] = self.Testset[product].apply(lambda id_: self.item_map_dict[str(id_)])
 
 
         #TESTSET
-        #dictonary: userId : {"ids":[...], "ratings":[...], 'weights':[...]}
-        #ids : indexy items
-        self.User_Items_testset = self.columns_to_dict(self.Testset, 'userId_', ['itemId_','rating'])
-        #dictonary: itemId : {"ids":[...], "ratings":[...], 'weights':[...]}
-        #ids : indexy users
-        self.Item_Users_testset = self.columns_to_dict(self.Testset, 'itemId_', ['userId_','rating'])
+        self.User_Items_testset = self.columns_to_dict(self.Testset, key='user_', keys_val=['product_',rating])
+        self.Item_Users_testset = self.columns_to_dict(self.Testset, key='product_', keys_val=['user_',rating])
 
         #koeficient <0,1> ovlivnujici tendenci modelu doporucovat popularni items (1)
         self.beta = None
+        
 
 
-    def columns_to_dict(self, df, key_column, value_column):
+    def columns_to_dict(self, df, key, keys_val):
         """Transformace pandas.DataFrame do dictonary"""
         dict_ = {}
-        matrix = df[[key_column] + value_column].as_matrix()
-
-        for row in matrix:
-            key = int(row[0])
-            ids = int(row[1])
-            rating = row[2]
-            if(matrix.shape[1]>3):
-                weight = row[3]
-            try:
-                dict_[key]['ids'].append(ids)
-                dict_[key]['ratings'].append(rating)
-                if(matrix.shape[1]>3):
-                    dict_[key]['weights'].append(weight)
-
-            except:
-                dict_[key] = {'ids':[], 'ratings':[], 'weights':[]}
-                dict_[key]['ids'].append(ids)
-                dict_[key]['ratings'].append(rating)
-                if(matrix.shape[1]>3):
-                    dict_[key]['weights'].append(weight)
-
+        df_ = df[[key] + keys_val]
+        keys_ = ['ids', 'ratings', 'weights']
+        for key, group in df_.groupby(key):
+            dict_[key] = {}
+            for idx, key_val in enumerate(keys_val):
+                dict_[key][keys_[idx]] = group[key_val].tolist()
 
         return dict_
 
     def item_pop(self, dataset):
         """Priradi kazdemu itemu pocet hodnoceni oznacenych jako relevantni (popularita itemu)
-        dataset : pandas.DataFrame(({userId: string, itemId: string, itemId_ : number, rating: float}))
+        dataset : pandas.DataFrame(({user: string, product: string, product_ : number, rating: float}))
         ----------------------
         return dict({item_ : # relevant ratings})
         """
         dict_ = {}
-
-        for itemId, dataframe in dataset.groupby('itemId_'):
-            r_sum = np.sum(dataframe['rating']>=self.relevant)
-            dict_[itemId] = r_sum
+        for product, dataframe in dataset.groupby('product_'):
+            dict_[product] = np.sum(dataframe[self.rating]>=self.relevant)
 
         return dict_
 
     def item_weight(self,dataset):
         dict_ = {}
-        for itemId, dataframe in dataset.groupby('itemId_'):
-            no_relevant_ratings = np.sum(dataframe['rating']>=self.relevant)
-            dict_[itemId] = pow((1/(no_relevant_ratings+1)),self.beta)
+        for product, dataframe in dataset.groupby('product_'):
+            no_relevant_ratings = np.sum(dataframe[self.rating]>=self.relevant)
+            dict_[product] = pow((1/(no_relevant_ratings+1)),self.beta)
 
         return dict_
     '''
@@ -226,46 +87,51 @@ class MatrixFactorization:
     '''
     def init(self):
         from sys import getsizeof
+        import ctypes
+
         """ Inicializace matice latentnich vektoru users a items. Inicializace matice U.T*U a V.T*V"""
-        if(self.random_init):#Chci nahodne inicializovat latentni vektory pri zapoceti optimalizace s jinymi parametry?
-            if(self.multiprocessing):#Chci pouzit multiprocessing?
-                #print("START INIT USER AND ITEMS FEATURE VECTORES")
-                #Nehrozi paralelni pristup ke sdilenym zdrojum(radkum matice), neni potreba zamykat. Kazdy proces ma urcenou mnozinu radku, ktere updatuje.
-                user_shared_array = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_Users * self.no_factors), lock=False),dtype=np.float32)
-                self.Users = user_shared_array.reshape(self.no_Users, self.no_factors)
-                print("USER SIZE FLOAT", self.Users.nbytes, "bytes")
+        if(self.random_init):
+            if(self.no_processes>1):
+                
+                self.max_no_Users = int(self.no_Users*1.5)
+                self.user_shared_array = multiprocessing.Array(ctypes.c_float, np.random.rand(self.max_no_Users * self.no_factors), lock=False)
+                self.Users = np.frombuffer(self.user_shared_array,dtype=np.float32)[:self.no_Users * self.no_factors].reshape(self.no_Users, self.no_factors)
+                print("USER SIZE FLOAT", self.Users.nbytes/1e6, "MB")
 
-                item_shared_array = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_Items * self.no_factors), lock= False),dtype=np.float32)
-                self.Items = item_shared_array.reshape(self.no_Items, self.no_factors)
-                print("ITEM SIZE FLOAT", self.Items.nbytes, "bytes")
+                self.max_no_Items = int(self.no_Items*1.5)
+                self.item_shared_array = multiprocessing.Array(ctypes.c_float, np.random.rand(self.max_no_Items * self.no_factors)
+                self.Items = np.frombuffer(self.item_shared_array[:self.no_Items * self.no_factors], lock= False),dtype=np.float32.reshape(self.no_Items, self.no_factors)
+                print("ITEM SIZE FLOAT", self.Items.nbytes/1e6, "MB")
 
-                #Matice sdilena vsemi procesory U.T * U
-                self.UU = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_factors * self.no_factors), lock= False),dtype=np.float32).reshape(self.no_factors, self.no_factors)
-                print("UU SIZE FLOAT", self.UU.nbytes, "bytes")
-                self.VV = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_factors * self.no_factors), lock= False),dtype=np.float32).reshape(self.no_factors, self.no_factors)
-                print("VV SIZE FLOAT", self.VV.nbytes, "bytes")
-                #print("FINISH INIT USER AND ITEMS FEATURE VECTORES")
+#                 self.UU = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_factors * self.no_factors), lock= False),dtype=np.float32).reshape(self.no_factors, self.no_factors)
+#                 print("UU SIZE FLOAT", self.UU.nbytes/1e6, "MB")
+#                 self.VV = np.frombuffer(multiprocessing.Array(ctypes.c_float, np.random.rand(self.no_factors * self.no_factors), lock= False),dtype=np.float32).reshape(self.no_factors, self.no_factors)
+#                 print("VV SIZE FLOAT", self.VV.nbytes/1e6, "MB")
 
 
             else:
+                print("INIT FACTOR MATRICES")
+                print(self.no_Users, self.no_factors,self.no_Items, self.no_factors)
                 self.Users = np.random.rand(self.no_Users, self.no_factors)
                 self.Items = np.random.rand(self.no_Items, self.no_factors)
 
-                self.UU = np.random.rand(self.no_factors, self.no_factors)
-                self.VV = np.random.rand(self.no_factors, self.no_factors)
+        self.UU = np.random.rand(self.no_factors, self.no_factors)
+        self.VV = np.random.rand(self.no_factors, self.no_factors)
 
 
-    def init_optimizer(self, beta):
+    def init_optimizer(self):
         """Kontrola nastavenych parametru a prirazeni vah"""
-
-        if(self.weights_mode == "AllRank"):
+        beta = self.beta
+        if(self.weights_mode == "MF-RMSE"):
+            assert self.weight == 0, "Weight of missiong values MF-RMSE mode must be 0! Use AllRank or AllRank-pop"
+            assert beta == 0, "Beta must be 0!"
+            self.init_users_items_dictonary()
+            print("** Set weight: ",self.weight, " to missing ratings **")
+            
+        elif(self.weights_mode == "AllRank"):
             assert beta == 0, "Beta must be 0! Use AllRank-pop"
-
-            if(self.beta is None or self.beta != beta):
-                self.beta = 0
-                self.Item_weight = self.item_weight(self.Trainset)
-                self.init_users_items_dictonary()
-            print("** Set weight: ",self.weight, " to missing ratings and ", set(self.Trainset['weight'])," to observate ratings **")
+            self.init_users_items_dictonary()
+            print("** Set weight: ",self.weight, " to missing ratings **")
 
         elif(self.weights_mode == "AllRank-pop"):
             print("AllRank-pop")
@@ -275,45 +141,19 @@ class MatrixFactorization:
                 self.init_users_items_dictonary()
             print("** Set weight: ",self.weight, " to missing ratings", ", beta: ",self.beta," and avg weight ", self.Trainset['weight'].mean(), "**")
 
-        elif(self.weights_mode == "MF-RMSE"):
-            assert self.weight == 0, "Weight of missiong values MF-RMSE mode must be 0! Use AllRank or AllRank-pop"
-            assert beta == 0, "Beta must be 0!"
-
-            if(self.beta is None or self.beta != beta):
-                self.beta = 0
-                self.Item_weight = self.item_weight(self.Trainset)
-                self.init_users_items_dictonary()
-            print("** Set weight: ",self.weight, " to missing ratings **")
-
         if(self.imputation_value != 0 ):
             print("** Surrogate missing rating values by imputation value: ", self.imputation_value, " **")
 
     def init_users_items_dictonary(self):
-        self.Trainset['weight'] = self.Trainset['itemId_'].apply(lambda id_: self.Item_weight[id_])
-        weight_sum = self.Trainset['weight'].sum()
-        self.Trainset['weight'] = self.Trainset['weight'].apply(lambda w: w/weight_sum*self.no_ratings)
-
-        #dictonary: userId : {"ids":[...], "ratings":[...], 'weights':[...]} ; ids : indexy items
-        self.User_Items = self.columns_to_dict(self.Trainset, 'userId_', ['itemId_','rating', 'weight'])
-        #dictonary: itemId : {"ids":[...], "ratings":[...], 'weights':[...]} ; ids : indexy users
-        self.Item_Users = self.columns_to_dict(self.Trainset, 'itemId_', ['userId_','rating', 'weight'])
-
-
-    '''
-    ATOP
-    '''
-
-    def ATOP(self, User_Items):
-        """Vypocet ATOP http://users.cs.fiu.edu/~lzhen001/activities/KDD_USB_key_2010/docs/p713.pdf"""
-#         d = now()
-        pool = multiprocessing.Pool(processes = self.no_processes)
-        nranks = pool.map_async(NRANKs_u, [(self.Users[user], self.User_Items[user]['ids'], self.Items) for user in self.User_Items.keys()])
-
-        pool.close()
-        pool.join()
-        ATOP = np.mean([item for sublist in nranks.get() for item in sublist])
-#         print("TIME ATOP ", now() - d)
-        return ATOP
+        if(self.weights_mode == "AllRank-pop"):
+            self.Trainset['weight'] = self.Trainset['product_'].apply(lambda id_: self.Item_weight[id_])
+            weight_sum = self.Trainset['weight'].sum()
+            self.Trainset['weight'] = self.Trainset['weight'].apply(lambda w: w/weight_sum*self.no_ratings)
+        else:
+            self.Trainset['weight'] = 1
+        
+        self.User_Items = self.columns_to_dict(self.Trainset, 'user_', ['product_',self.rating, 'weight'])
+        self.Item_Users = self.columns_to_dict(self.Trainset, 'product_', ['user_',self.rating, 'weight'])
 
 
     '''
@@ -321,7 +161,7 @@ class MatrixFactorization:
     '''
     def RMSE(self, Item_Users):
         """Vypocet RMSE"""
-#         d = now()
+#         d = self.now()
         U = self.Users
         V = self.Items
         errors = []
@@ -333,11 +173,112 @@ class MatrixFactorization:
             item_latent = V[item].T
             errors.extend((np.array(ratings) - (self.imputation_value + np.dot(users_latent, item_latent)))**2)
 
-        rmse = sqrt(np.mean(errors))
-#         print("RMSE time ", now() - d)
+        rmse = np.sqrt(np.mean(errors))
+#         print("RMSE time ", self.now() - d)
         return rmse
 
+    '''
+    ATOP
+    '''
 
+    def ATOP(self, User_Items):
+        """Vypocet ATOP https://github.com/drdakjak/MatrixFactorization/blob/master/p713.pdf"""
+#         d = now()
+        pool = multiprocessing.Pool(processes = self.no_processes)
+        nranks = pool.map_async(NRANKs_u, [(self.Users[user], User_Items[user]['ids'], self.Items) for user in User_Items.keys()])
+
+        pool.close()
+        pool.join()
+        ATOP = np.mean([item for sublist in nranks.get() for item in sublist])
+#         print("TIME ATOP ", now() - d)
+        return ATOP
+
+    '''
+    ADD NEW RECORD
+    '''
+    
+    def add_record(self, record, is_test_case=False):
+        user_id, item_id, rating = record[self.user_id], record[self.item_id], record[self.rating_id]
+        
+        if user_id in self.user_map_dict:
+            if is_test_case:
+                self.User_Items_testset[user_id]['ids'].append(item_id)
+                self.User_Items_testset[user_id]['ratings'].append(rating) 
+                self.User_Items_testset[user_id]['weights'].append(weight) # TODO weight      
+            else:
+                self.User_Items[user_id]['ids'].append(item_id)
+                self.User_Items[user_id]['ratings'].append(rating) 
+                self.User_Items[user_id]['weights'].append(weight) # TODO weight                                     
+        else:
+            
+            if self.no_Users+1 > self.max_no_Users:
+                print("Reallocation user matrix")
+                self.max_no_Users = int(self.max_no_Users*1.5)
+                user_shared_array_ = multiprocessing.Array(ctypes.c_float,
+                                                           np.append(
+                                                               self.Users.reshape(self.no_Users * self.no_factors),
+                                                               np.random.rand((self.max_no_Users - self.no_Users) * self.no_factors)
+                                                                   ), lock=False)                                          
+            
+                del self.user_shared_array
+                self.user_shared_array = user_shared_array_
+                
+            self.user_map_dict[user_id] = self.no_Users
+            if is_test_case:
+                assert False, "Any record in training set for user"
+            else:
+                self.User_Items[self.no_Users] = {'ids': [item_id], 'ratings': [rating], 'weights': []} # TODO weight
+
+            self.no_Users += 1
+            self.Users_set.add(user_id)
+            self.Users = np.frombuffer(self.user_shared_array,dtype=np.float32)[:self.no_Users * self.no_factors].reshape(self.no_Users, self.no_factors)
+            
+
+                                                               
+        if item_id in self.item_map_dict:
+            if is_test_case:
+                self.Item_Users_testset[item_id]['ids'].append(user_id)
+                self.Item_Users_testset[item_id]['ratings'].append(rating) 
+                self.Item_Users_testset[item_id]['weights'].append(weight) # TODO weight  
+            else:
+                self.Item_Users[item_id]['ids'].append(user_id)
+                self.Item_Users[item_id]['ratings'].append(rating) 
+                self.Item_Users[item_id]['weights'].append(weight) # TODO weight                                     
+        else:
+            if self.no_Items+1 > self.max_no_Items:
+                print("Reallocation product matrix")
+                self.max_no_Items = int(self.max_no_Items*1.5)
+                item_shared_array_ = multiprocessing.Array(ctypes.c_float,
+                                                           np.append(
+                                                               self.Items.reshape(self.no_Items * self.no_factors),
+                                                               np.random.rand((self.max_no_Items - self.no_Items) * self.no_factors)
+                                                                   ), lock=False)                                          
+            
+                del self.item_shared_array
+                self.item_shared_array = item_shared_array_
+                
+            self.item_map_dict[item_id] = self.no_Items
+            if is_test_case:
+                assert False, "Any record in training set for product"
+            else:
+                self.Item_Users[self.no_Items] = {'ids': [user_id], 'ratings': [rating], 'weights': []} # TODO weight
+
+            self.no_Items += 1
+            self.Items_set.add(item_id)
+            self.Items = np.frombuffer(self.item_shared_array,dtype=np.float32)[:self.no_Items * self.no_factors].reshape(self.no_Items, self.no_factors)
+           
+        UU = self.UU[:]
+        VV = self.VV[:]
+        for _ in range(6):
+            user_id_ = self.user_map_dict[user_id]                                                
+            self.UU[:] = UU + (self.weight*self.Users[user_id_].T).dot(self.Users[user_id_])
+            self.items_factor([self.item_map_dict[item_id]])
+            
+            item_id_ = self.user_map_dict[item_id]
+            self.VV[:] = VV + (self.weight*self.Items[item_id_].T).dot(self.Items[[item_id_]])                                   
+            self.users_factor([self.user_map_dict[user_id]])
+
+    
     '''
     LATENT FACTORS
     '''
@@ -345,7 +286,6 @@ class MatrixFactorization:
     def items_factor(self,batch):
         """Update latentnich vektoru. Kazdy procesor dostane disjunktni "varku" latentnich vektoru ke zpracovani.
         batch: range(i,i+N)
-
         http://users.cs.fiu.edu/~lzhen001/activities/KDD_USB_key_2010/docs/p713.pdf
         """
         V = self.Items
@@ -355,12 +295,11 @@ class MatrixFactorization:
 
         weight, no_factors,no_Items = self.weight, self.no_factors, self.no_Items
         eye = np.eye(no_factors, dtype=np.float32)
-        d = now()
+        d = self.now()
         for i in batch:
             item_users = self.Item_Users[i]
             i_rated = item_users['ids']
             U_s = np.take(U, i_rated, axis=0)
-
             Wi = np.array([item_users['weights']], dtype = np.float32)
 
             lM = (np.array([item_users['ratings']], dtype = np.float32) - r_m).dot(np.multiply(Wi.T.dot(np.ones((1,no_factors))), U_s))
@@ -369,7 +308,7 @@ class MatrixFactorization:
             res = np.linalg.solve(rM+reg,lM.T)
             #Update latentniho vektoru items matice
             V[i,:] = res.ravel()
-        print("ITEM TIME ", now() - d)
+        print("ITEM TIME ", str(self.now() - d))
 
 
     def users_factor(self, batch):
@@ -380,34 +319,38 @@ class MatrixFactorization:
 
         weight, no_factors,no_Users = self.weight, self.no_factors, self.no_Users
         eye = np.eye(no_factors, dtype = np.float32)
-        d = now()
+        d = self.now()
         for u in batch:
             user_items = self.User_Items[u]
             u_rated = user_items['ids']
 
             V_s = np.take(V, u_rated, axis=0)
-
             Wu = np.array([user_items['weights']], dtype = np.float32)
 
+                
             lM = (np.array([user_items['ratings']], dtype = np.float32) - r_m).dot(np.multiply(Wu.T.dot(np.ones((1,no_factors))), V_s))
             rM = VV - (weight*V_s.T).dot(V_s) + np.multiply(V_s.T, np.ones((no_factors,1)).dot(Wu)).dot(V_s)
             reg = lambda_ * (weight * (no_Users-Wu.shape[0]) + (Wu-weight).sum()) * eye
             res = np.linalg.solve(rM+reg,lM.T)
             #Update latentniho vektoru users matice
             U[u,:] = res.ravel()
-        print("USER TIME ", now() - d)
+        print("USER TIME ", str(self.now() - d))
 
     '''
     OPTIMIZE RMSE
     '''
-    def optimize_rmse(self, beta):
+    def optimize_rmse(self):
         #inicializuj user/item matici latentnich vektoru a U.T * U, V.T * V (V: matice latentnich vektoru items)
+        
         self.init()
-        self.init_optimizer(beta)
+        self.init_optimizer()
+        
+        weighted_errors_test = []
+        weighted_errors_train = []
 
-        weighted_errors = []
         ATOPs = []
-
+        
+        print(self.Items.shape[0], self.no_processes)
         step_item = int(np.ceil(len(self.Items)/float(self.no_processes)))
         step_user = int(np.ceil(len(self.Users)/float(self.no_processes)))
 
@@ -430,40 +373,38 @@ class MatrixFactorization:
 
         for ii in range(self.no_iterations):
 
-            if(self.multiprocessing):
+            if(self.no_processes>1):
                 #ITEMS latent vectors
                 process = []
 
-                d = now()
+                d = self.now()
                 self.UU[:] = (self.weight*self.Users.T).dot(self.Users)
-                print("UU ", now() - d)
-                print(self.Items[0])
-                d = now()
+                print("UU ", self.now() - d)
+                d = self.now()
                 for batch in item_range:
-                    p = Process(target = self.items_factor, args = (batch,))
+                    p = multiprocessing.Process(target = self.items_factor, args = (batch,))
                     p.daemon = True
                     process.append(p)
                     p.start()
 
                 [p.join() for p in process]
-                print("Item time",  now()-d)
-                print(self.Items[0])
+                print("Item time",  self.now()-d)
                 #USERS latent vectors
                 process = []
 
-                d = now()
+                d = self.now()
                 self.VV[:] = (self.weight*self.Items.T).dot(self.Items)
-                print("VV ", now() - d)
+                print("VV ", self.now() - d)
 
-                d = now()
+                d = self.now()
                 for batch in user_range:
-                    p = Process(target = self.users_factor, args = (batch,))
+                    p = multiprocessing.Process(target = self.users_factor, args = (batch,))
                     p.daemon = True
                     process.append(p)
                     p.start()
 
                 [p.join() for p in process]
-                print("User time ",  now()-d)
+                print("User time ",  self.now()-d)
 
             else:
                 print("Single process")
@@ -475,56 +416,53 @@ class MatrixFactorization:
                     self.users_factor(batch,)
 
 
-            print(ii,end=";")
-            #vypocti RMSE na training set
-#                 weighted_errors.append(self.RMSE(self.Item_Users))
-            #vypocti RMSE na testset
+            print(ii)
             if True: #((self.no_iterations-1) == ii):
-                d = now()
-                rmse = self.RMSE(self.Item_Users)
-                #vypocti ATOP
-                if(self.compute_ATOP):
-                    atop = self.ATOP(self.Item_Users)
-                    ATOPs.append(atop)
-                    print("\nATOP ", atop, " RMSE ", rmse, " TIME ", now()-d)
-                else:
-                    ATOPs = [0]
-                    print("\nRMSE", rmse, " TIME ", now()-d)
+                d = self.now()
+                weighted_errors_test.append(self.RMSE(self.Item_Users_testset))
+                weighted_errors_train.append(self.RMSE(self.Item_Users))
 
-        return weighted_errors, ATOPs
+                print("Train RMSE", weighted_errors_train[-1], " TIME ", str(self.now()-d))
+                print("Test RMSE", weighted_errors_test[-1], " TIME ", str(self.now()-d))
+        
+        ATOP = self.ATOP(self.User_Items_testset)
+        return weighted_errors_test, ATOP
 
 
-    def optimaze(self, no_iterations=1, loss_function="RMSE",  lambda_ = 0.001,  no_processes = 1, no_factors = 50, random_init = True,
-                 weights_mode = "MF-RMSE", weight = 0, imputation_value = 0, beta = 0, mlprocessing= False, save_matrix = False, compute_ATOP = False):
+    def solve(self, no_iterations=1, loss_function="RMSE",  lambda_=0.001,  no_processes=1, no_factors=50, random_init=True,
+                 weights_mode="MF-RMSE", weight=0, imputation_value=0, beta=0):
 
-        if(not mlprocessing):
-            self.no_processes = 1
-        else:
-            self.no_processes = no_processes
+        self.no_factors, self.lambda_, self.loss_function = no_factors, lambda_, loss_function 
+        self.no_iterations, self.no_processes, self.random_init = no_iterations, no_processes, random_init
+        self.beta, self.imputation_value, self.weight, self.weights_mode = beta, imputation_value, weight, weights_mode
 
-        self.multiprocessing = mlprocessing
-        self.loss_function = loss_function
-        self.lambda_ = lambda_
-        self.no_factors = no_factors
-        self.no_iterations = no_iterations
-        self.random_init = random_init
-        self.weights_mode = weights_mode
-        self.weight = weight
-        self.imputation_value = imputation_value
-        self.compute_ATOP = compute_ATOP
+                                                               
+        self.weighted_errors, self.ATOP = self.optimize_rmse()
+        
+        row_factors = []
+        user_map = {v: k for k, v in self.user_map_dict.items()}
+        for idx, laten_vec in enumerate(self.Users):
+            string_idx = user_map[idx]
+            row_factors.append((string_idx, laten_vec))
+        df_row_factors = pd.DataFrame(data=row_factors, columns=['id','factors'])
+        
+        column_factors = []
+        item_map = {v: k for k, v in self.item_map_dict.items()}
+        for idx, laten_vec in enumerate(self.Items):
+            string_idx = item_map[idx]
+            column_factors.append((string_idx, laten_vec))
+        df_column_factors = pd.DataFrame(data=column_factors, columns=['id','factors'])
 
-
-        weighted_errors, ATOPs = self.optimize_rmse(beta)
-        self.ATOPv = np.max(ATOPs)
-        if(save_matrix):
-            self.save_matrices()
-
-#         self.plot_rmse(weighted_errors)
-        return np.max(ATOPs)
+        return df_row_factors, df_column_factors
+    
     '''
     PLOT AND EXPLORE
     '''
-    def plot_rmse(self, weighted_errors):
+    def plot_rmse(self):
+        import matplotlib.pyplot as plt
+        plt.style.use('ggplot')
+        %matplotlib inline
+        weighted_errors = self.weighted_errors
         plt.plot(np.log(weighted_errors), label="weighted error: "+str(weighted_errors[-1]))
         plt.ylabel("RMSE log scale")
         plt.xlabel("no iterations")
@@ -533,8 +471,12 @@ class MatrixFactorization:
         plt.show()
 
     def explore(self):
+        rating = self.rating
+        import matplotlib.pyplot as plt
+        plt.style.use('ggplot')
+        %matplotlib inline
+
         print("Explore trainset")
-        relevant = self.relevant
         no_ratings = self.Trainset.shape[0]
         no_missing = self.no_Users * self.no_Items - no_ratings
         no_all = no_ratings + no_missing
@@ -550,67 +492,37 @@ class MatrixFactorization:
         plt.show()
         print("#{} rating, #{} missing".format(no_ratings, no_missing))
         print("Estimate offset w(m): ", no_ratings/no_missing)
-        ratings = self.Trainset["rating"].values
+        ratings = self.Trainset[rating].values
         print("Avg of ratings: ", ratings.mean())
 
-        #relevantni vs. irelevantni hodnoceni
-        no_relevant = np.sum(ratings>=relevant)
-        no_irelevant = np.sum(ratings<relevant)
-        labels = ["relevant", "irrelevenat"]
+#         #relevantni vs. irelevantni hodnoceni
+#         no_relevant = np.sum(ratings>=relevant)
+#         no_irelevant = np.sum(ratings<relevant)
+#         labels = ["relevant", "irrelevenat"]
 
-        sizes = [no_relevant, no_irelevant]
-        colors = ['lightskyblue', 'lightcoral']
-        plt.pie(sizes, labels=labels,
-                autopct='%1.1f%%', shadow=True, startangle=90, colors= colors)
-        plt.axis('equal')
-        plt.show()
+#         sizes = [no_relevant, no_irelevant]
+#         colors = ['lightskyblue', 'lightcoral']
+#         plt.pie(sizes, labels=labels,
+#                 autopct='%1.1f%%', shadow=True, startangle=90, colors= colors)
+#         plt.axis('equal')
+#         plt.show()
 
-        print("#{} relevant, #{} irelevant".format(no_relevant, no_irelevant))
+#         print("#{} relevant, #{} irelevant".format(no_relevant, no_irelevant))
 
         #rozlozeni popularity mezi items
-        items_popularity = np.sort(list(self.Item_pop.values()))[::-1]
-#         plt.bar(range(len(items_popularity)),items_popularity)
-        plt.xticks([])
-        plt.ylabel("# of item rating marked as relevant")
-        plt.xlabel("item")
-        plt.plot(items_popularity,'_')
-        plt.show()
+#         items_popularity = np.sort(list(self.Item_pop.values()))[::-1]
+# #         plt.bar(range(len(items_popularity)),items_popularity)
+#         plt.xticks([])
+#         plt.ylabel("# of item rating marked as relevant")
+#         plt.xlabel("item")
+#         plt.plot(items_popularity,'_')
+#         plt.show()
 
         #Histogram hodnoceni
-        plt.hist(self.Trainset['rating'].values,bins = len(set(self.Trainset['rating'])))
+        plt.hist(self.Trainset[rating].values,bins = len(set(self.Trainset[rating])))
         plt.xlabel("rating")
         plt.show()
-
-    def save_matrices(self):
-        d = now()
-        no_iterations, no_factors, lambda_ , weight, r_m = self.no_iterations, self.no_factors, self.lambda_, self.weight, self.imputation_value
-        ndataset, fold = self.ndataset, self.no_fold
-        if not os.path.exists(data_path+"MATRICES/"+ndataset):
-            os.makedirs(data_path+"MATRICES/"+ndataset)
-        if(self.compute_ATOP):
-            atop_suffix = "_ATOP:"+str(self.ATOPv)
-        else:
-            atop_suffix =""
-
-        with open(data_path+"MATRICES/"+ndataset+"/"+ndataset+str(no_fold)+"_model_f:"+str(no_factors)+"l:"+str(lambda_)+"w:"+str(weight)+"b:"+str(self.beta)+"r:"+str(self.imputation_value)+atop_suffix+".txt", 'w') as f:
-            f.write("m "+str(self.Users.shape[0])+"\n")
-            f.write("n "+str(self.Items.shape[0])+"\n")
-            f.write("k "+str(no_factors)+"\n")
-
-            user_map = {v: k for k, v in self.user_map_dict.items()}
-            for idx, laten_vec in enumerate(self.Users):
-                string_idx = user_map[idx]
-                idf = self.users_str2int[string_idx]
-                f.write("p"+str(idf)+" "+' '.join(list(map(str,laten_vec)))+"\n")
-
-            item_map = {v: k for k, v in self.item_map_dict.items()}
-            for idx, laten_vec in enumerate(self.Items):
-                string_idx = item_map[idx]
-                idf = self.items_str2int[string_idx]
-                f.write("q"+str(idf)+" "+' '.join(list(map(str,laten_vec)))+"\n")
-
-        print("************ UKLADANI MATICE ", now()-d)
-
+        
 def NRANKs_u(args):
     """Vypocti normalizovany rank pro uzivatele.
     args: user latentni vektor, user testovaci items, matice latentnich vektoru items
@@ -620,50 +532,7 @@ def NRANKs_u(args):
     ratings_hat = np.dot(user_vec, V.T)
     N = ratings_hat.shape[0]
     ratings = ratings_hat[items]
+    
     nranks = np.array(list(map(lambda rating: np.sum(ratings_hat<rating), ratings)))/N
 
     return nranks
-
-
-# # MAIN
-
-# In[ ]:
-
-if __name__ == "__main__":
-    test_size, relevant = 0.0, 1
-    SAVE_MATRIX = True
-    ATOP = False
-    #[0,1,2,3,4,5,6,7,8,9]
-    for no_fold in [2,3,4,5,6,7,8,9]:  #iteruj pres testovaci slozky
-        #odstran z datasetu testovaci users obsazene ve slozce
-        ratings = dataset[~dataset.userId.isin(user_folds[no_fold])]
-        trainset, testset = split_dataset(ratings.copy(),test_size = test_size, relevant = relevant)
-
-        MFact = MatrixFactorization(trainset, testset, no_fold = no_fold , test_size = test_size, relevant = relevant, ndataset = ndataset,
-                                    users_str2int= users_str2int, items_str2int = items_str2int)
-        #[0, 0.0008, 0.001, 0.0015 ,0.002, 0.005, 0.01, 0.02]
-        for lambda_ in [0.001, 0.008, 0.01]: #iteruj pres lambda
-            #[1, 2, 5, 10, 30, 50, 100,200, 300],
-            for no_factor in [256]:# [20,50,100]: # iteruj pres delku latentnich vektoru
-                for no_iterations in [6]: #iteruj pres pocet iteraci alternating least square
-                    #[-2,-1,-0.5,-0.2,0, 0.2, 0.5, 1, 2]
-                    for beta in [0]:
-                        for weight in [0.01, 0.05, 0.1]:
-                            for imputation_value in [0]:
-                                for p in [12]:
-                                    d = now()
-                                    ATOP = MFact.optimaze(no_iterations = no_iterations,  lambda_ = lambda_, no_processes = p, no_factors = no_factor,
-                                                          beta = beta,
-                                                          weights_mode = "AllRank-pop", weight = weight, imputation_value = imputation_value,
-                                                          random_init = True, mlprocessing = True, save_matrix = SAVE_MATRIX, compute_ATOP = ATOP)
-
-                                    print("********** TIME ",p, now() - d)
-                                    print("************************************")
-
-
-# # Line profiler
-
-# In[ ]:
-
-# %load_ext line_profiler
-# %lprun -f MFact.users_factor MFact.users_factor(range(0,1000))
